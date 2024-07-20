@@ -18,8 +18,8 @@ message("Getting WorldClim data...")
 library(geodata)
 # geodata::worldclim_global is smart enough to *cache* the data--
 # it will only download if the data don't exist at the path we give it
-tavg <- worldclim_global("tavg", "10", "worldclim_data/")
-prec <- worldclim_global("prec", "10", "worldclim_data/")
+tavg <- worldclim_global("tavg", "5", "worldclim_data/")
+prec <- worldclim_global("prec", "5", "worldclim_data/")
 
 # Extract our points of interest. terra::extract() will handle making sure
 # the coordinates get mapped to the correct grid cell(s) in the data
@@ -115,14 +115,28 @@ drought_cutoff <- -1
 message("Merging back into SRDB data...")
 srdb %>%
     left_join(srdb_spei, by = c("Study_midyear", "Longitude", "Latitude")) %>%
-    mutate(drought = gsd0 <= drought_cutoff,
-           year1_drought = gsd1 <= drought_cutoff,
-           year2_drought = gsd2 <= drought_cutoff,
-           out_1year = !drought & year1_drought,
-           out_2year = !drought & !year1_drought & year2_drought) ->
+
+    mutate(
+        # I am not sure about having an arbitrary 'drought cutoff'
+        # What about a birch variable that is
+        #   (gsd0 - gsd1) if gsd0 >=0, and 0 otherwise
+        # In other words, the gsd difference from year 0 to year -1, but only
+        # when gsd0 (the current year) is at least 0, i.e. normal
+        birch = if_else(gsd0 > 0 & gsd1 < 0, gsd0 - gsd1, 0),
+
+        # Logical variant
+        birch_lgl = gsd0 > 0 & gsd1 < drought_cutoff,
+
+        drought = gsd0 <= drought_cutoff,
+        year1_drought = gsd1 <= drought_cutoff,
+        year2_drought = gsd2 <= drought_cutoff,
+        out_1year = !drought & year1_drought,
+        out_2year = !drought & !year1_drought & year2_drought) ->
     srdb_final
 
 # ================= Growing season tests
+
+library(car)
 
 srdb_final %>%
     filter(!is.na(Rs_growingseason),
@@ -132,17 +146,13 @@ srdb_final %>%
 # Null model - MAT, MAP, drought index as predictors
 m0_gs <- lm( sqrt(Rs_growingseason) ~ wcMAT  + wcMAP + drought, data = srdb_gs)
 print(summary(m0_gs))
+car::Anova(m0_gs, type = "III")
 
 # Birch effect model - does emergence from drought (no drought in the current
 # year, but drought the previous year) have a significant effect?
-m1_gs <- lm( sqrt(Rs_growingseason) ~ wcMAT  + wcMAP + drought + out_1year, data = srdb_gs)
+m1_gs <- lm( sqrt(Rs_growingseason) ~ wcMAT  + wcMAP + drought + birch_lgl, data = srdb_gs)
 print(summary(m1_gs))
-
-# Birch effect model - does emergence from drought (no drought in the current
-# year or previous year, but drought 2 years previously) have a significant effect?
-m2_gs <- lm( sqrt(Rs_growingseason) ~ wcMAT  + wcMAP + drought + out_2year, data = srdb_gs)
-print(summary(m2_gs))
-
+car::Anova(m1_gs, type = "III")
 
 
 # ================= Annual tests
@@ -156,13 +166,12 @@ srdb_final %>%
 # Null model - MAT, MAP, drought index as predictors
 m0_an <- lm( sqrt(Rs_annual) ~ wcMAT  + wcMAP + drought, data = srdb_an)
 print(summary(m0_an))
+shapiro.test(residuals(m0_an))
+car::Anova(m0_an, type = "III")
 
 # Birch effect model - does emergence from drought (no drought in the current
 # year, but drought the previous year) have a significant effect?
-m1_an <- lm( sqrt(Rs_annual) ~ wcMAT  + wcMAP + drought + out_1year, data = srdb_an)
+m1_an <- lm( sqrt(Rs_annual) ~ wcMAT  + wcMAP + drought + birch_lgl, data = srdb_an)
 print(summary(m1_an))
+car::Anova(m1_an, type = "III")
 
-# Birch effect model - does emergence from drought (no drought in the current
-# year or previous year, but drought 2 years previously) have a significant effect?
-m2_an <- lm( sqrt(Rs_annual) ~ wcMAT  + wcMAP + drought + out_2year, data = srdb_an)
-print(summary(m2_an))
