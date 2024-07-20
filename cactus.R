@@ -1,0 +1,168 @@
+
+library(dplyr)
+read.csv("srdb_data/srdb-data.csv") %>%
+    select(Record_number, Study_midyear, Latitude, Longitude, Manipulation, Rs_annual, Rs_growingseason) %>%
+    mutate(Latitude = round(Latitude, 2), Longitude = round(Longitude, 2)) %>%
+    filter(Manipulation == "None", Latitude > 0) %>%
+    filter(!is.na(Rs_growingseason) | !is.na(Rs_annual)) %>%
+    filter(!is.na(Latitude), !is.na(Longitude), !is.na(Study_midyear)) %>%
+    as_tibble() ->
+    srdb
+
+coords <- srdb[c("Longitude", "Latitude")] %>% distinct()
+message(nrow(coords), " distinct coordinate pairs")
+
+# ---------- WorldClim climatology
+
+message("Getting WorldClim data...")
+library(geodata)
+# geodata::worldclim_global is smart enough to *cache* the data--
+# it will only download if the data don't exist at the path we give it
+tavg <- worldclim_global("tavg", "10", "worldclim_data/")
+prec <- worldclim_global("prec", "10", "worldclim_data/")
+
+# Extract our points of interest. terra::extract() will handle making sure
+# the coordinates get mapped to the correct grid cell(s) in the data
+library(terra)
+tavg_dat <- terra::extract(tavg, coords)
+prec_dat <- terra::extract(prec, coords)
+
+coords_wc <- coords
+coords_wc$wcMAT <- rowMeans(tavg_dat[-1]) # monthly average
+coords_wc$wcMAP <- rowSums(prec_dat[-1]) # monthly average
+
+srdb <- left_join(srdb, coords_wc, by = c("Longitude", "Latitude"))
+
+# ---------- SPEI drought dataset
+
+#coords <- coords[1:324,] # about 20%
+
+# This is expensive, so we cache the extracted SPEI data
+spei_dat_file <- paste("spei", nrow(coords), digest::digest(coords), sep = "_")
+if(file.exists(spei_dat_file)) {
+    message("Loading saved data ", spei_dat_file)
+    spei_dat <- readRDS(spei_dat_file)
+} else {
+    message("Extracting SPEI data; this is slow...")
+    # Documentation: https://spei.csic.es/database.html
+    # Data downloaded 2024-07-17
+    library(terra)
+    spei <- rast("spei_data/spei01.nc")
+
+    # Extract our points of interest. terra::extract() will handle making sure
+    # the coordinates get mapped to the correct grid cell(s) in the data
+    spei_dat <- terra::extract(spei, coords)
+    saveRDS(spei_dat, file = spei_dat_file)
+}
+
+# Reshape data into a more manageable form
+library(tidyr)
+spei_monthly <- pivot_longer(spei_dat, -ID)
+spei_monthly <- separate(spei_monthly, name, into = c("spei", "entry"), convert = TRUE)
+# The SPEI data don't seem to provide 'time' explicitly in the netcdf, so
+# compute it from the entries
+spei_monthly$year <- ceiling(spei_monthly$entry / 12) + 1900
+spei_monthly$month <- (spei_monthly$entry - 1) %% 12 + 1
+spei_monthly$time <- with(spei_monthly, year + (month-1) / 12)
+
+# Compute gsd - growing season drought
+spei_monthly %>%
+    arrange(ID, year, month) %>%
+    group_by(ID, year) %>%
+    summarise(gsd = mean(value[6:8]), .groups = "drop") ->
+    gsd
+
+# Merge back with coords
+coords %>%
+    mutate(ID = seq_len(nrow(coords))) %>%
+    left_join(gsd, by = "ID") ->
+    gsd
+
+library(ggplot2)
+p <- ggplot(gsd, aes(year, gsd, color = ID)) + geom_point()
+print(p)
+
+# For each lon/lat pair in the SRDB data, look up gsd0 (current year SPEI),
+# gsd1 (last year), and gsd2 (etc)
+get_spei <- function(lon, lat, yr) {
+    gsd %>%
+        filter(Longitude == lon, Latitude == lat) %>%
+        arrange(year) -> x
+
+    if(nrow(x) == 0) return(c(NA, NA, NA)) # not found
+
+    y <- which(x$year == yr)
+    x$gsd[c(y, y-1, y-2)]
+}
+
+srdb %>%
+    select(Study_midyear, Longitude, Latitude) %>%
+    mutate(year = floor(Study_midyear)) %>%
+    distinct() ->
+    srdb_spei
+
+message("Looking up growing season SPEI (yr 0, -1, -2) for SRDB data...")
+srdb_spei$gsd2 <- srdb_spei$gsd1 <- srdb_spei$gsd0 <- NA_real_
+for(i in seq_len(nrow(srdb_spei))) {
+    spei_i <- get_spei(srdb_spei$Longitude[i], srdb_spei$Latitude[i], srdb_spei$year[i])
+    srdb_spei$gsd0[i] <- spei_i[1]
+    srdb_spei$gsd1[i] <- spei_i[2]
+    srdb_spei$gsd2[i] <- spei_i[3]
+}
+
+drought_cutoff <- -1
+
+message("Merging back into SRDB data...")
+srdb %>%
+    left_join(srdb_spei, by = c("Study_midyear", "Longitude", "Latitude")) %>%
+    mutate(drought = gsd0 <= drought_cutoff,
+           year1_drought = gsd1 <= drought_cutoff,
+           year2_drought = gsd2 <= drought_cutoff,
+           out_1year = !drought & year1_drought,
+           out_2year = !drought & !year1_drought & year2_drought) ->
+    srdb_final
+
+# ================= Growing season tests
+
+srdb_final %>%
+    filter(!is.na(Rs_growingseason),
+           Rs_growingseason < 20) ->
+    srdb_gs
+
+# Null model - MAT, MAP, drought index as predictors
+m0_gs <- lm( sqrt(Rs_growingseason) ~ wcMAT  + wcMAP + drought, data = srdb_gs)
+print(summary(m0_gs))
+
+# Birch effect model - does emergence from drought (no drought in the current
+# year, but drought the previous year) have a significant effect?
+m1_gs <- lm( sqrt(Rs_growingseason) ~ wcMAT  + wcMAP + drought + out_1year, data = srdb_gs)
+print(summary(m1_gs))
+
+# Birch effect model - does emergence from drought (no drought in the current
+# year or previous year, but drought 2 years previously) have a significant effect?
+m2_gs <- lm( sqrt(Rs_growingseason) ~ wcMAT  + wcMAP + drought + out_2year, data = srdb_gs)
+print(summary(m2_gs))
+
+
+
+# ================= Annual tests
+
+srdb_final %>%
+    filter(!is.na(Rs_annual),
+           Rs_annual > 0,
+           Rs_annual < 2000) ->
+    srdb_an
+
+# Null model - MAT, MAP, drought index as predictors
+m0_an <- lm( sqrt(Rs_annual) ~ wcMAT  + wcMAP + drought, data = srdb_an)
+print(summary(m0_an))
+
+# Birch effect model - does emergence from drought (no drought in the current
+# year, but drought the previous year) have a significant effect?
+m1_an <- lm( sqrt(Rs_annual) ~ wcMAT  + wcMAP + drought + out_1year, data = srdb_an)
+print(summary(m1_an))
+
+# Birch effect model - does emergence from drought (no drought in the current
+# year or previous year, but drought 2 years previously) have a significant effect?
+m2_an <- lm( sqrt(Rs_annual) ~ wcMAT  + wcMAP + drought + out_2year, data = srdb_an)
+print(summary(m2_an))

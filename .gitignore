@@ -47,3 +47,14 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# OS files
+.DS_Store
+
+# Data
+worldclim_data/**/*.tif
+spei_data/*.nc
+era5_data/*.grib
+modis_data/*.hdf
+soilgrids_data/*.tif
+srdb_data/*.csv
