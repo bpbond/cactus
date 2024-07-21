@@ -1,14 +1,20 @@
 
 library(dplyr)
-read.csv("srdb_data/srdb-data.csv") %>%
+srdb_raw <- read.csv("srdb_data/srdb-data.csv")
+
+srdb_raw %>%
+    filter(Meas_method %in% c("IRGA", "Gas chromatography")) %>%
     select(Record_number, Study_midyear, Latitude, Longitude, Manipulation, Rs_annual, Rs_growingseason) %>%
-    mutate(Latitude = round(Latitude, 2), Longitude = round(Longitude, 2)) %>%
+    mutate(Latitude = round(Latitude, 2),
+           Longitude = round(Longitude, 2),
+           Year = floor(Study_midyear)) %>%
     filter(Manipulation == "None", Latitude > 0) %>%
     filter(!is.na(Rs_growingseason) | !is.na(Rs_annual)) %>%
     filter(!is.na(Latitude), !is.na(Longitude), !is.na(Study_midyear)) %>%
     as_tibble() ->
     srdb
 
+coords_year <- srdb[c("Year", "Longitude", "Latitude")] %>% distinct()
 coords <- srdb[c("Longitude", "Latitude")] %>% distinct()
 message(nrow(coords), " distinct coordinate pairs")
 
