@@ -45,13 +45,13 @@ srdb <- left_join(srdb, coords_wc, by = c("Longitude", "Latitude"))
 era5_dat_file <- paste("era5", nrow(coords_year), digest::digest(coords_year), sep = "_")
 if(file.exists(era5_dat_file)) {
     message("Loading saved data ", era5_dat_file)
-    spei_dat <- readRDS(era5_dat_file)
+    era5_results <- readRDS(era5_dat_file)
 } else {
     message("Getting ERA5 data; this is slow...")
     library(tidyr)
     get_era5 <- function(lon, lat, year) {
         f <- list.files("era5_data/", pattern = paste0("^", year), full.names = TRUE)
-        if(length(f) == 0) return(NA)
+        if(length(f) == 0) return(NULL)
 
         era5 <- rast(f)
         dat <- terra::extract(era5, data.frame(lon, lat))
@@ -62,12 +62,14 @@ if(file.exists(era5_dat_file)) {
         dat$name[grep("Volumetric soil water", dat$name)] <- "VWC"
         dat %>%
             group_by(ID, month, name) %>%
+            # sum the two LAI (high and low veg)
             summarise(value = sum(value), .groups = "drop")
     }
 
+    # Do this row by row just to keep things manageable
     era5_results <- list()
     for(i in seq_len(nrow(coords_year))) {
-        if(i %% 100 == 0) message(i, " of ", nrow(coords_year))
+        if(i %% 50 == 0) message(i, " of ", nrow(coords_year))
         era5_results[[i]] <- get_era5(coords_year$Longitude[i], coords_year$Latitude[i], coords_year$Year[i])
     }
     era5_results <- bind_rows(era5_results, .id = "row")
