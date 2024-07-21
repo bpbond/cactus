@@ -39,6 +39,42 @@ coords_wc$wcMAP <- rowSums(prec_dat[-1]) # monthly average
 
 srdb <- left_join(srdb, coords_wc, by = c("Longitude", "Latitude"))
 
+# ---------- ERA5 climate data
+
+# This is expensive, so we cache the extracted ERA5 data
+era5_dat_file <- paste("era5", nrow(coords_year), digest::digest(coords_year), sep = "_")
+if(file.exists(era5_dat_file)) {
+    message("Loading saved data ", era5_dat_file)
+    spei_dat <- readRDS(era5_dat_file)
+} else {
+    message("Getting ERA5 data; this is slow...")
+    library(tidyr)
+    get_era5 <- function(lon, lat, year) {
+        f <- list.files("era5_data/", pattern = paste0("^", year), full.names = TRUE)
+        if(length(f) == 0) return(NA)
+
+        era5 <- rast(f)
+        dat <- terra::extract(era5, data.frame(lon, lat))
+        dat <- pivot_longer(dat, -ID)
+        dat$month <- rep(1:12, each = 4)
+        dat$name[grep("2 metre temperature", dat$name)] <- "Tair"
+        dat$name[grep("undefined", dat$name)] <- "LAI"
+        dat$name[grep("Volumetric soil water", dat$name)] <- "VWC"
+        dat %>%
+            group_by(ID, month, name) %>%
+            summarise(value = sum(value), .groups = "drop")
+    }
+
+    era5_results <- list()
+    for(i in seq_len(nrow(coords_year))) {
+        if(i %% 100 == 0) message(i, " of ", nrow(coords_year))
+        era5_results[[i]] <- get_era5(coords_year$Longitude[i], coords_year$Latitude[i], coords_year$Year[i])
+    }
+    era5_results <- bind_rows(era5_results, .id = "row")
+    saveRDS(era5_results, file = era5_dat_file)
+}
+
+
 # ---------- SPEI drought dataset
 
 #coords <- coords[1:324,] # about 20%
