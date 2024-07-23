@@ -53,7 +53,11 @@ get_era5_all <- function(coords_year, years_back) {
     } else {
         message("Getting ERA5 data for ", years_back, "; this is slow...")
         library(tidyr)
-        get_era5 <- function(lon, lat, year) {
+        get_era5 <- function(i, coords_year, years_back) {
+            lon = coords_year$Longitude[i]
+            lat = coords_year$Latitude[i]
+            year = coords_year$Year[i]
+
             f <- list.files("era5_data/",
                             pattern = paste0("^", year - years_back),
                             full.names = TRUE)
@@ -75,18 +79,20 @@ get_era5_all <- function(coords_year, years_back) {
 
         # Do this row by row just to keep things manageable
         era5_results <- list()
-        for(i in seq_len(nrow(coords_year))) {
-            if(i %% 100 == 0) message(i, " of ", nrow(coords_year))
-            era5_results[[i]] <- get_era5(coords_year$Longitude[i], coords_year$Latitude[i], coords_year$Year[i])
-        }
+        library(parallel)
+        era5_results <- mclapply(seq_len(nrow(coords_year)),
+                                 get_era5,
+                                 coords_year, years_back,
+                                 mc.cores = parallel::detectCores() - 1)
         era5_results <- bind_rows(era5_results, .id = "row")
         saveRDS(era5_results, file = era5_dat_file)
     }
+    return(era5_results)
 }
 
 era5_0 <- get_era5_all(coords_year, 0)
 era5_1 <- get_era5_all(coords_year, 1)
-era5_0 <- get_era5_all(coords_year, 2)
+era5_2 <- get_era5_all(coords_year, 2)
 
 
 # ---------- SPEI drought dataset
